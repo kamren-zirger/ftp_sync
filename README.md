@@ -16,6 +16,12 @@ Use either yaml or json. An example yaml file is provided with all of the curren
 
 If the patcher option is not specified, files will be transfered unmodified.
 
+Configured paths pairs can be both files or both directories. Directories are synced recursively. The local directory and remote FTP directory must both exist. Files in directories are matched by their relative paths.
+
+When running `sync-all` with configured directories, files with conflicting changes on each end of the pair are skipped and reported at the end. File deletions are disabled by default. Set `delete: true` on a directory pair to remove destination-only files. When running `sync-all` with configured directories, only files previously synchronized are eligible for deletion.
+
+The FTP connection and login timeout defaults to 5 seconds. Set `connect_timeout` in the configuration to change it. This timeout applies only while connecting and logging in; file transfers are not limited by it.
+
 ## Automatic sync behavior
 
 On your first run, you'll likely have to specify one of the to/from commands if both remote and local files exist.
@@ -51,7 +57,7 @@ Ex: `python3 -m ftp_sync sync -n pokemon_pearl` will sync the `pokemon_pearl` sy
 ## Future work
 
 - [x] Windows support
-- [ ] Add directory sync support
+- [x] Add directory sync support
 - [ ] Sync between multiple sources/servers
 - [ ] Cleanup old backup files
 - [ ] Define and enforce config file schema

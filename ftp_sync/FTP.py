@@ -1,5 +1,6 @@
 import contextlib
 import datetime
+import io
 import logging
 import hashlib
 import json
@@ -26,6 +27,44 @@ class Patcher:
         pass
     def from_remote(self, file):
         pass
+
+
+class ExtensionTransformation:
+    def __init__(self, local, remote, patcher=None):
+        self.local = local
+        self.remote = remote
+        self.patcher = patcher
+
+    def local_to_remote(self, path):
+        return self._replace_suffix(path, self.local, self.remote)
+
+    def remote_to_local(self, path):
+        return self._replace_suffix(path, self.remote, self.local)
+
+    @staticmethod
+    def _replace_suffix(path, source, destination):
+        path = str(path)
+        if path.endswith(source):
+            return path[:-len(source)] + destination
+        return path
+
+
+class ComposedPatcher(Patcher):
+    def __init__(self, patchers):
+        self.patchers = tuple(patcher for patcher in patchers if patcher is not None)
+
+    @staticmethod
+    def _apply(data, patchers, method):
+        for patcher in patchers:
+            source = io.BytesIO(data)
+            data = getattr(patcher, method)(source)
+        return data
+
+    def to_remote(self, file):
+        return self._apply(file.read(), self.patchers, "to_remote")
+
+    def from_remote(self, file):
+        return self._apply(file.read(), reversed(self.patchers), "from_remote")
 
 class DESMumePatcher(Patcher):
     DESMUME_FOOTER = b'|<--Snip above here to create a raw sav by excluding this DeSmuME savedata footer:\x01\x00\x04\x00\x00\x00\x08\x00\x06\x00\x00\x00\x03\x00\x00\x00\x00\x00\x08\x00\x00\x00\x00\x00|-DESMUME SAVE-|'
@@ -199,20 +238,47 @@ class FTPSync:
         else:
             self.sync_from(local_path, remote_path, patcher=patcher)
 
-    def sync_directory(self, local_path, remote_path, method="sync", patcher=None, delete=False):
-        """Synchronize files below two existing directory roots by relative path."""
+    def sync_directory(self, local_path, remote_path, method="sync", patcher=None,
+                       delete=False, extension_transformations=None):
+        """Synchronize files below two existing directory roots by logical relative path."""
         local_root = Path(local_path)
         remote_root = FTPHelper.normalize_remote_path(remote_path)
-        local_entries = {
-            path.relative_to(local_root).as_posix(): ("directory" if path.is_dir() else "file")
-            for path in local_root.rglob("*")
-        }
+        transformations = extension_transformations or ()
+        local_entries = {}
+        remote_paths = {}
+        for path in local_root.rglob("*"):
+            relative_path = path.relative_to(local_root).as_posix()
+            remote_relative = relative_path
+            transformation = None
+            for candidate in transformations:
+                if relative_path.endswith(candidate.local):
+                    remote_relative = candidate.local_to_remote(relative_path)
+                    transformation = candidate
+                    break
+            if remote_relative in remote_paths:
+                raise ValueError(f"extension transformation collision: {relative_path} and {remote_paths[remote_relative]}")
+            remote_paths[remote_relative] = relative_path
+            local_entries[relative_path] = ("directory" if path.is_dir() else "file", transformation)
         remote_entries = self.ftp_helper.list_tree(remote_root)
+        remote_local_entries = {}
+        for relative_path, entry_type in remote_entries.items():
+            local_relative = relative_path
+            transformation = None
+            for candidate in transformations:
+                if relative_path.endswith(candidate.remote):
+                    local_relative = candidate.remote_to_local(relative_path)
+                    transformation = candidate
+                    break
+            if local_relative in remote_local_entries:
+                raise ValueError(f"extension transformation collision on remote path: {relative_path}")
+            remote_local_entries[local_relative] = (entry_type, transformation, relative_path)
         conflicts = 0
-        all_paths = sorted(set(local_entries) | set(remote_entries))
+        all_paths = sorted(set(local_entries) | set(remote_local_entries))
         for relative_path in all_paths:
-            local_type = local_entries.get(relative_path)
-            remote_type = remote_entries.get(relative_path)
+            local_entry = local_entries.get(relative_path)
+            remote_entry = remote_local_entries.get(relative_path)
+            local_type, transformation = local_entry if local_entry else (None, None)
+            remote_type, remote_transformation, remote_relative = remote_entry if remote_entry else (None, None, None)
             if local_type and remote_type and local_type != remote_type:
                 logger.warning("Not syncing %s: local and remote types differ", relative_path)
                 conflicts += 1
@@ -220,16 +286,18 @@ class FTPSync:
             if local_type == "directory" or remote_type == "directory":
                 continue
             local_file = local_root / relative_path
-            remote_file = posixpath.join(remote_root, relative_path)
+            remote_file = posixpath.join(remote_root, remote_relative or transformation.local_to_remote(relative_path) if transformation else relative_path)
+            active_transformation = transformation or remote_transformation
+            file_patcher = ComposedPatcher((patcher, active_transformation.patcher if active_transformation else None))
             if local_type and remote_type:
-                self._sync_directory_file(local_file, remote_file, method, patcher=patcher)
+                self._sync_directory_file(local_file, remote_file, method, patcher=file_patcher)
             elif method == "sync_to" and local_type:
-                self.sync_to(local_file, remote_file, patcher=patcher)
+                self.sync_to(local_file, remote_file, patcher=file_patcher)
             elif method == "sync_to" and remote_type and delete:
                 logger.info("Removing remote file %s", remote_file)
                 self.ftp_helper.delete_file(remote_file)
             elif method == "sync_from" and remote_type:
-                self.sync_from(local_file, remote_file, patcher=patcher)
+                self.sync_from(local_file, remote_file, patcher=file_patcher)
             elif method == "sync_from" and local_type and delete:
                 logger.info("Removing local file %s", local_file)
                 local_file.unlink()
@@ -241,13 +309,13 @@ class FTPSync:
                         logger.info("Removing remote file %s", remote_file)
                         self.ftp_helper.delete_file(remote_file)
                     else:
-                        self.sync_to(local_file, remote_file, patcher=patcher)
+                        self.sync_to(local_file, remote_file, patcher=file_patcher)
                 elif remote_type and not local_type:
                     if delete and previous_local is not None and previous_local == previous_remote:
                         logger.info("Removing local file %s", local_file)
                         local_file.unlink()
                     else:
-                        self.sync_from(local_file, remote_file, patcher=patcher)
+                        self.sync_from(local_file, remote_file, patcher=file_patcher)
         return conflicts
 
     def sync_from(self, local_path, remote_path, patcher=None, delete=False):

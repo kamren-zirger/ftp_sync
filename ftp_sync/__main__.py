@@ -27,6 +27,33 @@ def _build_patcher(value):
         raise click.ClickException(f"unknown patcher: {value['name']}") from exc
 
 
+def _build_extension_transformations(pair):
+    values = pair.get('extension_transformations', [])
+    if not isinstance(values, list):
+        raise click.ClickException("extension_transformations must be a list")
+    transformations = []
+    local_extensions = set()
+    remote_extensions = set()
+    for index, value in enumerate(values):
+        if not isinstance(value, dict):
+            raise click.ClickException(f"extension transformation {index} must be a mapping")
+        local = value.get('local')
+        remote = value.get('remote')
+        if (not isinstance(local, str) or not local.startswith('.') or len(local) == 1 or
+                not isinstance(remote, str) or not remote.startswith('.') or len(remote) == 1):
+            raise click.ClickException(
+                f"extension transformation {index} requires non-empty local and remote suffixes")
+        if '/' in local or '\\' in local or '/' in remote or '\\' in remote:
+            raise click.ClickException(f"extension transformation {index} must contain suffixes only")
+        if local in local_extensions or remote in remote_extensions:
+            raise click.ClickException(f"duplicate extension transformation at index {index}")
+        local_extensions.add(local)
+        remote_extensions.add(remote)
+        rule_patcher = _build_patcher(value['patcher']) if 'patcher' in value else None
+        transformations.append(FTP.ExtensionTransformation(local, remote, rule_patcher))
+    return transformations
+
+
 def _parse_pair_to_kwargs(pair):
     if not isinstance(pair, dict) or 'local_path' not in pair or 'remote_path' not in pair:
         raise click.ClickException("each sync pair requires local_path and remote_path")
@@ -38,7 +65,8 @@ def _parse_pair_to_kwargs(pair):
     if not remote_path.startswith('/'):
         raise click.ClickException("remote_path must be an absolute FTP path")
     kwargs = {'local_path': local_path, 'remote_path': remote_path,
-              'delete': bool(pair.get('delete', False))}
+              'delete': bool(pair.get('delete', False)),
+              'extension_transformations': _build_extension_transformations(pair)}
     if 'patcher' in pair:
         kwargs['patcher'] = _build_patcher(pair['patcher'])
     return kwargs
@@ -80,6 +108,8 @@ def _run_pair(sync, pair, method):
         if not local_is_directory or not remote_is_directory:
             raise click.ClickException("local_path and remote_path must both be directories or both be files")
         return sync.sync_directory(method=method, **kwargs)
+    if kwargs['extension_transformations']:
+        raise click.ClickException("extension_transformations require a directory pair")
     if method == 'sync':
         return sync.sync(**kwargs)
     if method == 'sync_to':

@@ -20,6 +20,28 @@ Configured paths pairs can be both files or both directories. Directories are sy
 
 When running `sync-all` with configured directories, files with conflicting changes on each end of the pair are skipped and reported at the end. File deletions are disabled by default. Set `delete: true` on a directory pair to remove destination-only files. When running `sync-all` with configured directories, only files previously synchronized are eligible for deletion.
 
+Directory pairs can rename file extensions without changing file contents. Add `extension_transformations` as a list of rules:
+
+```yaml
+extension_transformations:
+  - local: ".srm"
+    remote: ".sav"
+  - local: ".state"
+    remote: ".st"
+```
+
+The mapping is reversible, so a remote `.sav` is downloaded as `.srm`. Rules replace only the final, case-sensitive suffix. Files with no matching rule keep their names. Duplicate local or remote suffixes are rejected, and transformations apply to directory pairs only.
+
+An extension rule may also have a content patcher. It can be combined with the pair-level `patcher`: uploads apply the pair patcher followed by the rule patcher; downloads apply them in reverse order.
+
+```yaml
+extension_transformations:
+  - local: ".srm"
+    remote: ".sav"
+    patcher:
+      name: desmume
+```
+
 The FTP connection and login timeout defaults to 5 seconds. Set `connect_timeout` in the configuration to change it. This timeout applies only while connecting and logging in; file transfers are not limited by it.
 
 ## Automatic sync behavior

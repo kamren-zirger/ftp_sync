@@ -11,3 +11,10 @@ sync:
     local_path: "/home/brian/saves"
     remote_path: "/ndsroms/saves"
     delete: false
+    extension_transformations:
+      - local: ".srm"
+        remote: ".sav"
+        patcher:
+          name: other-patcher
+      - local: ".state"
+        remote: ".st"
